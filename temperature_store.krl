@@ -1,114 +1,101 @@
-ruleset com.blacklite.krl.wovyn_base {
+ruleset com.blacklite.krl.temperature_store {
   meta {
-    name "Wovyn Base"
+    name "Temperature Store"
     author "Michael Black"
 
-    use module com.blacklite.krl.twilio alias twilio
-    use module io.picolabs.subscription alias subscription
+    provides temperatures, threshold_violations, inrange_temperatures
 
-    shares __testing
+    shares __testing, temperatures, threshold_violations, inrange_temperatures
   }
 
   global {
+    temperatures = function() {
+      ent:temperature_readings
+    }
+
+    threshold_violations = function() {
+      ent:temperature_violations
+    }
+
+    inrange_temperatures = function() {
+      temperatures = ent:temperature_readings;
+      violations = ent:temperature_violations;
+
+      filtered_temps = temperatures.filter(function(v,k) {
+        violations.get(k.klog("key: ")).klog("violation value: ").isnull()
+      });
+
+      filtered_temps
+    }
+
     __testing = {
-      "queries":[ {"name": "__testing"} ],
-      "events": [ {"domain": "wovyn", "type": "heartbeat", "attrs": ["genericThing"]},
-                  {"domain": "wovyn", "type": "set_threshold", "attrs": ["threshold"]} ]
-    }
-  }
-
-  rule process_heartbeat {
-    select when wovyn heartbeat
-    pre {
-      generic_thing = event:attrs{"genericThing"}
-      data = generic_thing{"data"}
-      temp = data{"temperature"}
-      time = time:strftime(time:now(), "%F %T")
-      statusMessage = (generic_thing.isnull()) => "missing attribute: genericThing"
-                      | (temp.isnull()) => "error: unable to read temperature" | "ok"
-      status = (statusMessage == "ok") => "ok" | "error"
-    }
-
-    choose status {
-      ok => send_directive("Success!", {"message": "Successfully read a temperature from the wovyn thermometer", "Temperature Data": temp})
-      error => send_directive("Error!", {"message": statusMessage})
-    }
-
-    fired {
-      raise wovyn event "new_temperature_reading"
-        attributes {"timestamp": time, "temperature": temp}
-        if (status == "ok")
-    }
-  }
-
-  rule set_threshold {
-    select when wovyn set_threshold
-
-    if event:attr("threshold") like re#[0-9]*# then
-    send_directive("set_threshold", {"status": "OK", "threshold": event:attr("threshold") })
-
-    fired {
-      ent:threshold := event:attr("threshold")
+      "queries":[ {"name": "__testing"},
+                  {"name": "temperatures"},
+                  {"name": "threshold_violations"},
+                  {"name": "inrange_temperatures"} ]
     }
 
   }
 
-  rule guard_threshold {
+  rule guard_temperatures_map {
     select when wovyn new_temperature_reading
 
-    if ent:threshold.isnull() then noop()
+    if ent:temperature_readings.isnull() then noop();
 
     fired {
-      ent:threshold := 100;
+      ent:temperature_readings := {};
     }
   }
 
-  rule find_high_temps {
+  rule collect_temperatures {
     select when wovyn new_temperature_reading
+
     pre {
-      time = event:attrs{"timestamp"}
-      temp = event:attrs["temperature"]
-      tempF = temp[0]{"temperatureF"}
-      violation = (tempF > ent:threshold) => true | false
-      status = (violation) => "bad" | "good"
+      temperature = event:attrs{"temperature"}
+      timestamp = event:attrs{"timestamp"}
     }
 
-    choose status {
-      good => send_directive("Temperature Reading", {"message": "Tempurature looks good", "temperatureF": tempF, "timestamp": time});
-      bad => send_directive("Temperature Reading", {"message": "Warning! Temperature Violation!"});
-    }
+    if (not temperature.isnull() && not timestamp.isnull()) then noop()
 
     fired {
-      raise wovyn event "threshold_violation"
-        attributes {"timestamp": time, "temperatureF": tempF}
-        if violation
+      ent:temperature_readings{timestamp} := temperature[0]{"temperatureF"}.decode();
+      raise sensor event "profile_updated"
     }
   }
 
-  rule threshold_notification {
+  rule guard_tempearture_violations_map {
     select when wovyn threshold_violation
-    foreach subscription:established() setting(subscription)
+
+    if ent:temperature_violations.isnull() then noop()
+
+    fired {
+      ent:temperature_violations := {};
+    }
+  }
+
+  rule collect_threshold_violations {
+    select when wovyn threshold_violation
+
     pre {
       tempF = event:attrs{"temperatureF"}
-      message = "Warning: Temperature Threshold Violation! Reading: " + tempF
-      Tx = subscription{"Tx"}
-      Rx = subscription{"Rx"}
-      my_role = subscription{"Rx_role"}
+      timestamp = event:attrs{"timestamp"}
     }
 
-    if (my_role == "sensor") then
-    event:send(
-      {
-        "eci": Tx, "eid": "threshold_notification",
-        "domain": "threshold", "type": "violation_notification",
-        "attrs": {
-          "sci": Rx, "message": message, "temperature": tempF
-        }
-      })
+    if (not tempF.isnull() && not timestamp.isnull()) then noop();
 
-    always {
-      raise twilio event "send_message"
-        attributes {"to": "+17193590627", "from": "+17193966763", "message": message}
+    fired {
+      ent:temperature_violations{timestamp} := tempF;
+    }
+  }
+
+  rule clear_temperatures {
+    select when sensor reading_reset
+
+    noop()
+
+    fired {
+      ent:temperature_readings := {};
+      ent:temperautre_violations := {};
     }
   }
 }
